@@ -72,7 +72,9 @@ def generate_random_payment():
     
     prefix = random.choice(prefixes)
     suffix = f"{random.randint(0, 99):02d}"
-    masked_number = f"{prefix}******{suffix}"
+    
+    # টেলিগ্রাম মার্কডাউন এড়ানোর জন্য স্টার চিহ্নের আগে ব্যাকস্ল্যাশ (\) ব্যবহার করা হয়েছে
+    masked_number = f"{prefix}\*\*\*\*\*\*{suffix}"
     
     # Bangladesh Timezone
     tz = ZoneInfo("Asia/Dhaka")
@@ -181,7 +183,6 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Validation Failed. Please provide a positive whole number.")
 
 async def post_init(application: Application) -> None:
-    # Safely create background task inside the application event loop
     asyncio.create_task(proof_delivery_worker(application))
     logger.info("Background tasks attached via post_init hook.")
 
@@ -194,7 +195,7 @@ def main():
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
-    # Build Application Instance with post_init hook
+    # Build Application Instance
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Link Admin Interaction Routes
