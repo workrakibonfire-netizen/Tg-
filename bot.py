@@ -14,7 +14,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    filters,
 )
 from telegram.error import TelegramError
 
@@ -44,7 +43,6 @@ class AppState:
     def __init__(self):
         self.is_running = True
         self.interval = 30  # Default 30 seconds
-        self.bg_task: asyncio.Task | None = None
 
 state = AppState()
 
@@ -57,7 +55,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is alive")
 
     def log_message(self, format, *args):
-        # Override to prevent excessive server log flooding
         return
 
 def run_health_server():
@@ -115,14 +112,13 @@ async def proof_delivery_worker(application: Application):
                 except Exception as e:
                     logger.error(f"Unexpected transmission error: {e}")
             
-            # Use dynamically adjustable sleep interval
             await asyncio.sleep(state.interval)
         except asyncio.CancelledError:
             logger.info("Auto payment proof worker task received cancel signal.")
             break
         except Exception as e:
             logger.error(f"Worker critical loop recovery caught: {e}")
-            await asyncio.sleep(5) # Cooldown before re-attempting loop
+            await asyncio.sleep(5)
 
 # Admin Command Guard Filter
 def is_admin(update: Update) -> bool:
@@ -184,18 +180,22 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Validation Failed. Please provide a positive whole number.")
 
+async def post_init(application: Application) -> None:
+    # Safely create background task inside the application event loop
+    asyncio.create_task(proof_delivery_worker(application))
+    logger.info("Background tasks attached via post_init hook.")
+
 def main():
-    # Enforce token check
     if not BOT_TOKEN:
         logger.error("CRITICAL: BOT_TOKEN environment variable missing. Application terminating.")
         return
 
-    # Fire Web Service in Background Thread for Webhook Keep-Alive / Render metrics
+    # Fire Web Service in Background Thread
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
-    # Build Application Instance
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Build Application Instance with post_init hook
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Link Admin Interaction Routes
     application.add_handler(CommandHandler("start", start_cmd))
@@ -204,11 +204,7 @@ def main():
     application.add_handler(CommandHandler("off", off_cmd))
     application.add_handler(CommandHandler("interval", interval_cmd))
 
-    # Access base event loop to register continuous worker task
-    loop = asyncio.get_event_loop()
-    state.bg_task = loop.create_task(proof_delivery_worker(application))
-
-    # Initialize Bot Event Processing Engine via Long Polling
+    # Initialize Bot Event Processing Engine
     logger.info("Starting production pipeline execution polling loop...")
     application.run_polling()
 
