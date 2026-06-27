@@ -9,11 +9,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 
 # Import Python Telegram Bot v21+ modules
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 from telegram.error import TelegramError
 
@@ -42,7 +44,9 @@ PORT = int(os.getenv("PORT", "10000"))
 class AppState:
     def __init__(self):
         self.is_running = True
-        self.interval = 30  # Default 30 seconds
+        self.interval = 30  
+        self.min_amount = 20  
+        self.max_amount = 500  
 
 state = AppState()
 
@@ -64,25 +68,21 @@ def run_health_server():
 
 # Utility Data Generators
 def generate_random_payment():
-    methods = ["bKash", "Nagad", "Rocket", "Upay"]
+    methods = ["bKash", "Nagad"]
     prefixes = ["017", "018", "013", "019", "016", "015", "014"]
     
-    amount = random.randint(20, 500)
+    amount = random.randint(state.min_amount, state.max_amount)
     method = random.choice(methods)
     
     prefix = random.choice(prefixes)
     suffix = f"{random.randint(0, 99):02d}"
-    
-    # টেলিগ্রাম মার্কডাউন এড়ানোর জন্য স্টার চিহ্নের আগে ব্যাকস্ল্যাশ (\) ব্যবহার করা হয়েছে
     masked_number = f"{prefix}\*\*\*\*\*\*{suffix}"
     
-    # Bangladesh Timezone
     tz = ZoneInfo("Asia/Dhaka")
     now = datetime.now(tz)
     date_str = now.strftime("%d/%m/%Y")
     time_str = now.strftime("%I:%M %p")
     
-    # Markdown formatted text
     message = (
         "✅ *Withdrawal Successful*\n\n"
         "💳 *Payment Method:* {}\n"
@@ -126,61 +126,148 @@ async def proof_delivery_worker(application: Application):
 def is_admin(update: Update) -> bool:
     return update.effective_user is not None and update.effective_user.id == SUPER_ADMIN_ID
 
+# Main Admin Keyboard
+def get_admin_reply_keyboard():
+    keyboard = [
+        [KeyboardButton("🟢 Start Engine"), KeyboardButton("🔴 Stop Engine")],
+        [KeyboardButton("⏱ Change Time/Interval"), KeyboardButton("📊 View Live Status")],
+        [KeyboardButton("🧹 Clear Old Chat")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
+
+# Time Selection Sub-Keyboard
+def get_time_keyboard():
+    keyboard = [
+        [KeyboardButton("⏱ 30 Seconds"), KeyboardButton("⏱ 1 Minute")],
+        [KeyboardButton("⏱ 5 Minutes"), KeyboardButton("⏱ 10 Minutes")],
+        [KeyboardButton("⏱ 1 Hour"), KeyboardButton("⏱ 2 Hours")],
+        [KeyboardButton("⬅️ Back to Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
+
+def get_status_text():
+    run_status = "✨ Running / Active" if state.is_running else "💤 Stopped / Paused"
+    
+    # Format interval text nicely for the user
+    if state.interval < 60:
+        time_display = f"{state.interval} seconds"
+    elif state.interval < 3600:
+        time_display = f"{state.interval // 60} minute(s)"
+    else:
+        time_display = f"{state.interval // 3600} hour(s)"
+
+    return (
+        f"👑 *⚡ ADMIN CONTROL CENTER ⚡*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 *Bot Current Status:* {run_status}\n"
+        f"⏱ *Sending Interval:* `{time_display}`\n"
+        f"💵 *Amount Matrix Range:* `{state.min_amount} - {state.max_amount} BDT`\n"
+        f"📢 *Destination Channel/Group:* `{TARGET_CHAT_ID}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 *Quick Tip:* To set custom amount matrix range, use:\n"
+        f"▫️ `/range 50 200` (To change BDT limits)"
+    )
+
 # Command Handlers
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
+        await update.message.reply_text("👋 Welcome! I am an automated payment proof bot.", reply_markup=ReplyKeyboardRemove())
         return
-    await update.message.reply_text("🚀 Bot initialized successfully and operational status monitoring is active.")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    run_status = "Running" if state.is_running else "Stopped"
-    status_msg = (
-        f"📊 *System Operational Status*\n\n"
-        f"▪️ *Engine Status:* {run_status}\n"
-        f"▪️ *Current Interval:* {state.interval} seconds\n"
-        f"▪️ *Target Destination:* `{TARGET_CHAT_ID}`"
-    )
-    await update.message.reply_text(status_msg, parse_mode="Markdown")
-
-async def on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if state.is_running:
-        await update.message.reply_text("ℹ️ Auto proof delivery engine is already operational.")
-    else:
-        state.is_running = True
-        logger.info("Bot execution resumed by Admin.")
-        await update.message.reply_text("🟢 Auto proof delivery engine successfully started.")
-
-async def off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if not state.is_running:
-        await update.message.reply_text("ℹ️ Auto proof delivery engine is already paused.")
-    else:
-        state.is_running = False
-        logger.info("Bot execution paused by Admin.")
-        await update.message.reply_text("🔴 Auto proof delivery engine paused.")
-
-async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if not context.args:
-        await update.message.reply_text("❌ Usage Syntax Error. Example: `/interval 30`", parse_mode="Markdown")
-        return
-    
-    try:
-        new_interval = int(context.args[0])
-        if new_interval <= 0:
-            raise ValueError()
         
-        state.interval = new_interval
-        logger.info(f"Execution dispatch interval adjusted to: {new_interval} seconds by Admin.")
-        await update.message.reply_text(f"🎯 Broadcast interval updated successfully to *{new_interval} seconds*.", parse_mode="Markdown")
+    await update.message.reply_text(
+        "👋 *Welcome Back, Admin!*\n\n"
+        "🎛 Your control panel has been loaded below. Use buttons to manage settings.",
+        reply_markup=get_admin_reply_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ *Usage Example:* `/range 20 100`", parse_mode="Markdown")
+        return
+    try:
+        min_val = int(context.args[0])
+        max_val = int(context.args[1])
+        if min_val <= 0 or max_val <= 0 or min_val > max_val:
+            raise ValueError()
+        state.min_amount = min_val
+        state.max_amount = max_val
+        await update.message.reply_text(f"🎯 *Success:* Amount limits adjusted to *{min_val} - {max_val} BDT*.", parse_mode="Markdown")
     except ValueError:
-        await update.message.reply_text("❌ Validation Failed. Please provide a positive whole number.")
+        await update.message.reply_text("❌ *Error:* Please enter valid whole numbers.")
+
+# Handler for Admin Panel Buttons text input
+async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+
+    text = update.message.text
+
+    if text == "🟢 Start Engine":
+        if state.is_running:
+            await update.message.reply_text("ℹ️ *System Message:* The engine is already active.")
+        else:
+            state.is_running = True
+            await update.message.reply_text("🟢 *Engine Started:* Auto payment proof generation is live.")
+            
+    elif text == "🔴 Stop Engine":
+        if not state.is_running:
+            await update.message.reply_text("ℹ️ *System Message:* The engine is already stopped.")
+        else:
+            state.is_running = False
+            await update.message.reply_text("🔴 *Engine Stopped:* Auto production has been paused.")
+            
+    elif text == "📊 View Live Status":
+        await update.message.reply_text(get_status_text(), parse_mode="Markdown")
+        
+    elif text == "🧹 Clear Old Chat":
+        status_msg = await update.message.reply_text("⏳ *Processing:* Removing the last 100 messages...")
+        current_msg_id = status_msg.message_id
+        deleted_count = 0
+        for i in range(1, 101):
+            target_msg_id = current_msg_id - i
+            try:
+                await context.bot.delete_message(chat_id=TARGET_CHAT_ID, message_id=target_msg_id)
+                deleted_count += 1
+                await asyncio.sleep(0.05)
+            except TelegramError:
+                continue
+        await status_msg.edit_text(f"✨ *Clean Complete:* Deleted `{deleted_count}` messages successfully.")
+
+    elif text == "⏱ Change Time/Interval":
+        await update.message.reply_text(
+            "⏱ *Select Proof Post Interval Time:*",
+            reply_markup=get_time_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif text == "⬅️ Back to Menu":
+        await update.message.reply_text(
+            "🎛 Returning to Main Admin Menu.",
+            reply_markup=get_admin_reply_keyboard()
+        )
+
+    # Time Selection Logic
+    elif text == "⏱ 30 Seconds":
+        state.interval = 30
+        await update.message.reply_text("🎯 *Interval Set:* 30 Seconds. Message will post every 30s.")
+    elif text == "⏱ 1 Minute":
+        state.interval = 60
+        await update.message.reply_text("🎯 *Interval Set:* 1 Minute. Message will post every 60s.")
+    elif text == "⏱ 5 Minutes":
+        state.interval = 300
+        await update.message.reply_text("🎯 *Interval Set:* 5 Minutes.")
+    elif text == "⏱ 10 Minutes":
+        state.interval = 600
+        await update.message.reply_text("🎯 *Interval Set:* 10 Minutes.")
+    elif text == "⏱ 1 Hour":
+        state.interval = 3600
+        await update.message.reply_text("🎯 *Interval Set:* 1 Hour.")
+    elif text == "⏱ 2 Hours":
+        state.interval = 7200
+        await update.message.reply_text("🎯 *Interval Set:* 2 Hours.")
 
 async def post_init(application: Application) -> None:
     asyncio.create_task(proof_delivery_worker(application))
@@ -188,25 +275,23 @@ async def post_init(application: Application) -> None:
 
 def main():
     if not BOT_TOKEN:
-        logger.error("CRITICAL: BOT_TOKEN environment variable missing. Application terminating.")
+        logger.error("CRITICAL: BOT_TOKEN missing.")
         return
 
-    # Fire Web Service in Background Thread
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
-    # Build Application Instance
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Link Admin Interaction Routes
+    # Commands
     application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("status", status_cmd))
-    application.add_handler(CommandHandler("on", on_cmd))
-    application.add_handler(CommandHandler("off", off_cmd))
-    application.add_handler(CommandHandler("interval", interval_cmd))
+    application.add_handler(CommandHandler("admin", start_cmd)) 
+    application.add_handler(CommandHandler("range", range_cmd))
+    
+    # Text Message Handler for Keyboard Buttons
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_button_text_handler))
 
-    # Initialize Bot Event Processing Engine
-    logger.info("Starting production pipeline execution polling loop...")
+    logger.info("Starting polling loop...")
     application.run_polling()
 
 if __name__ == "__main__":
