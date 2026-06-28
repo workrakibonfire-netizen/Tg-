@@ -3,6 +3,7 @@ import random
 import logging
 import asyncio
 import threading
+import string
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -48,7 +49,15 @@ class AppState:
         self.max_amount = 500  
         self.min_interval = 20   
         self.max_interval = 300  
-        self.send_silent = True  # True হলে সাইলেন্ট (নোটিফিকেশন যাবে না), False হলে সাউন্ড যাবে
+        self.send_silent = True  
+        
+        # সামারি রিপোর্টের জন্য ট্র্যাকিং ভেরিয়েবলস
+        self.total_sent_today = 0
+        self.count_sent_today = 0
+        
+        # সফল মেসেজের কাউন্টার এবং পরবর্তী ফেইল্ড মেসেজের টার্গেট
+        self.success_counter = 0
+        self.next_failure_target = random.randint(10, 15) 
 
 state = AppState()
 
@@ -68,8 +77,13 @@ def run_health_server():
     logger.info(f"Health check server started on port {PORT}")
     server.serve_forever()
 
+# র্যান্ডম TxID জেনারেটর
+def generate_txid():
+    chars = string.ascii_uppercase + string.digits
+    return "".join(random.choice(chars) for _ in range(8))
+
 # Utility Data Generators
-def generate_random_payment():
+def generate_proof_message():
     methods = ["bKash", "Nagad"]
     prefixes = ["017", "018", "013", "019", "016", "015", "014"]
     
@@ -85,258 +99,260 @@ def generate_random_payment():
     date_str = now.strftime("%d/%m/%Y")
     time_str = now.strftime("%I:%M %p")
     
+    method_bn = "বিকাশ" if method == "bKash" else "নগদ"
+    
+    if state.success_counter >= state.next_failure_target:
+        state.success_counter = 0
+        state.next_failure_target = random.randint(10, 15)
+        
+        message = (
+            "❌ *Withdrawal Failed / Rejected*\n\n"
+            "💳 *Payment Method:* {}\n"
+            "📱 *Wallet Number:* {}\n"
+            "💰 *Amount:* {} BDT\n"
+            "📅 *Date:* {}\n"
+            "🕒 *Time:* {}\n\n"
+            "⚠️ *Reason:* আপনার ওয়ালেট নম্বরে {} একাউন্ট করা নেই। দয়া করে সঠিক নম্বরটি চেক করে আবার চেষ্টা করুন।"
+        ).format(method, masked_number, amount, date_str, time_str, method_bn)
+        
+        return message
+    
+    state.success_counter += 1
+    state.total_sent_today += amount
+    state.count_sent_today += 1
+    txid = generate_txid()
+    
     message = (
         "✅ *Withdrawal Successful*\n\n"
         "💳 *Payment Method:* {}\n"
         "📱 *Wallet Number:* {}\n"
         "💰 *Amount:* {} BDT\n"
+        "🆔 *TxID:* {}\n"
         "📅 *Date:* {}\n"
         "🕒 *Time:* {}\n\n"
         "🎉 *Congratulations! Payment Sent Successfully.*"
-    ).format(method, masked_number, amount, date_str, time_str)
+    ).format(method, masked_number, amount, txid, date_str, time_str)
     
     return message
 
-# Background Task for Automatic Proof Delivery with Random Interval
+# Background Task for Automatic Proof Delivery
 async def proof_delivery_worker(application: Application):
-    logger.info("Auto payment proof worker task started.")
     while True:
         try:
             current_sleep_time = random.randint(state.min_interval, state.max_interval)
-            logger.info(f"Next proof will be sent after a random interval of {current_sleep_time} seconds.")
-            
             await asyncio.sleep(current_sleep_time)
             
             if state.is_running:
-                proof_text = generate_random_payment()
+                proof_text = generate_proof_message()
                 try:
-                    # state.send_silent এর উপর ভিত্তি করে নোটিফিকেশন অন/অফ হবে
                     await application.bot.send_message(
                         chat_id=TARGET_CHAT_ID,
                         text=proof_text,
                         parse_mode="Markdown",
                         disable_notification=state.send_silent 
                     )
-                    logger.info(f"Payment proof dispatched. Silent Mode: {state.send_silent}")
-                except TelegramError as te:
-                    logger.error(f"Telegram API Error during dispatch: {te}")
-                except Exception as e:
-                    logger.error(f"Unexpected transmission error: {e}")
-            
+                except TelegramError:
+                    pass
         except asyncio.CancelledError:
-            logger.info("Auto payment proof worker task received cancel signal.")
             break
-        except Exception as e:
-            logger.error(f"Worker critical loop recovery caught: {e}")
+        except Exception:
             await asyncio.sleep(5)
 
-# Admin Command Guard Filter
+# Daily Summary Worker
+async def daily_summary_worker(application: Application):
+    tz = ZoneInfo("Asia/Dhaka")
+    while True:
+        try:
+            now = datetime.now(tz)
+            if now.hour == 20 and now.minute == 0:
+                if state.count_sent_today > 0:
+                    summary_msg = (
+                        "📊 *⚡ DAILY PAYMENT SUMMARY REPORT ⚡*\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📅 *Date:* {now.strftime('%d/%m/%Y')}\n"
+                        f"🚀 *Total Successful Payouts:* `{state.count_sent_today} Users`\n"
+                        f"💰 *Total Amount Disbursed:* `{state.total_sent_today} BDT`\n\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "🤝 *Thank you for staying with us!*"
+                    )
+                    try:
+                        await application.bot.send_message(
+                            chat_id=TARGET_CHAT_ID,
+                            text=summary_msg,
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                    state.total_sent_today = 0
+                    state.count_sent_today = 0
+                await asyncio.sleep(60)
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(5)
+
+# Admin Authorization Guard
 def is_admin(update: Update) -> bool:
     return update.effective_user is not None and update.effective_user.id == SUPER_ADMIN_ID
 
-# Main Admin Keyboard (ডায়নামিক বাটন সহ)
+# --- KEYBOARDS & MENUS ---
+
 def get_admin_reply_keyboard():
-    # নোটিফিকেশন স্ট্যাটাস অনুযায়ী বাটনের টেক্সট সেট হবে
     notif_button_text = "🔕 Notification: OFF (Silent)" if state.send_silent else "🔔 Notification: ON (Sound)"
-    
     keyboard = [
         [KeyboardButton("🟢 Start Engine"), KeyboardButton("🔴 Stop Engine")],
         [KeyboardButton(notif_button_text)],
-        [KeyboardButton("⏱ Preset Quick Time"), KeyboardButton("📊 View Live Status")],
-        [KeyboardButton("🧹 Clear Old Chat")]
+        [KeyboardButton("💰 Change Amount Limit"), KeyboardButton("⏱ Change Time/Interval")],
+        [KeyboardButton("📊 View Live Status"), KeyboardButton("🧹 Clear Old Chat")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
 
-# Time Selection Sub-Keyboard
 def get_time_keyboard():
     keyboard = [
         [KeyboardButton("⏱ Random 20s - 1m"), KeyboardButton("⏱ Random 30s - 5m")],
         [KeyboardButton("⏱ Random 1m - 10m"), KeyboardButton("⏱ Random 5m - 30m")],
-        [KeyboardButton("⬅️ Back to Menu")]
+        [KeyboardButton("⏱ Random 10m - 1h"), KeyboardButton("⏱ Random 1h - 3h")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
 
-# Seconds to Format Conversion Helper
+def get_amount_keyboard():
+    keyboard = [
+        [KeyboardButton("💰 Range: 20 - 100 BDT"), KeyboardButton("💰 Range: 50 - 500 BDT")],
+        [KeyboardButton("💰 Range: 100 - 1000 BDT"), KeyboardButton("💰 Range: 500 - 5000 BDT")],
+        [KeyboardButton("💰 Range: 1000 - 10000 BDT"), KeyboardButton("💰 Range: 5000 - 25000 BDT")],
+        [KeyboardButton("⬅️ Back to Main Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
+
 def format_seconds(seconds):
     if seconds < 60:
         return f"{seconds} seconds"
-    return f"{seconds // 60} minute(s)"
+    if seconds < 3600:
+        return f"{seconds // 60} minute(s)"
+    return f"{seconds // 3600} hour(s)"
 
 def get_status_text():
     run_status = "✨ Running / Active" if state.is_running else "💤 Stopped / Paused"
-    notif_status = "🔕 OFF (Silent Mode)" if state.send_silent else "🔔 ON (Sound Notification)"
-    
+    notif_status = "🔕 OFF (Silent Mode)" if state.send_silent else "🔔 ON (Sound)"
     return (
         f"👑 *⚡ ADMIN CONTROL CENTER ⚡*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🤖 *Bot Current Status:* {run_status}\n"
+        f"🤖 *Bot Status:* {run_status}\n"
         f"📢 *User Notification:* `{notif_status}`\n"
         f"🎲 *Random Time Range:* `{format_seconds(state.min_interval)}` to `{format_seconds(state.max_interval)}`\n"
         f"💵 *Amount Matrix Range:* `{state.min_amount} - {state.max_amount} BDT`\n"
-        f"📢 *Destination Chat ID:* `{TARGET_CHAT_ID}`\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Quick Settings via Text Commands:*\n"
-        f"▫️ `/timerange 20 300` (Set Custom Time Range in Seconds)\n"
-        f"▫️ `/range 50 200` (Set Custom BDT limits)"
+        f"📊 *Logged Today:* `{state.count_sent_today} items` | `{state.total_sent_today} BDT`\n"
+        f"⏰ *Auto Summary Report:* `Everyday at 08:00 PM` (Dhaka Time)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
     )
 
-# Command Handlers
+# Logic Handlers
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
-        await update.message.reply_text("👋 Welcome! I am an automated payment proof bot.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("👋 Welcome!", reply_markup=ReplyKeyboardRemove())
         return
-        
     await update.message.reply_text(
-        "👋 *Welcome Back, Admin!*\n\n"
-        "🎛 Your control panel has been loaded below. Use buttons or text commands to manage settings.",
+        "👋 *Welcome, Admin!*\n\n🎛 সম্পূর্ণ এ-টু-জেড বাটন কন্ট্রোল প্যানেল রেডি করা হয়েছে। নিচে ক্লিক করে যেকোনো সাব-মেনুতে প্রবেশ করতে পারেন।",
         reply_markup=get_admin_reply_keyboard(),
         parse_mode="Markdown"
     )
 
-async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ *Usage Example:* `/range 20 100`", parse_mode="Markdown")
-        return
-    try:
-        min_val = int(context.args[0])
-        max_val = int(context.args[1])
-        if min_val <= 0 or max_val <= 0 or min_val > max_val:
-            raise ValueError()
-        state.min_amount = min_val
-        state.max_amount = max_val
-        await update.message.reply_text(f"🎯 *Success:* Amount limits adjusted to *{min_val} - {max_val} BDT*.", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ *Error:* Please enter valid whole numbers.")
-
-async def timerange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ *Usage Example (in seconds):* `/timerange 20 300` (For 20s to 5m)", parse_mode="Markdown")
-        return
-    try:
-        min_t = int(context.args[0])
-        max_t = int(context.args[1])
-        if min_t <= 0 or max_t <= 0 or min_t > max_t:
-            raise ValueError()
-        state.min_interval = min_t
-        state.max_interval = max_t
-        await update.message.reply_text(f"🎯 *Success:* Random post time range set to *{format_seconds(min_t)} - {format_seconds(max_t)}*.", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ *Error:* Please enter valid numbers in seconds.")
-
-# Handler for Admin Panel Buttons text input
 async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-
     text = update.message.text
 
     if text == "🟢 Start Engine":
-        if state.is_running:
-            await update.message.reply_text("ℹ️ *System Message:* The engine is already active.")
-        else:
-            state.is_running = True
-            await update.message.reply_text("🟢 *Engine Started:* Auto random payment proof generation is live.")
-            
+        state.is_running = True
+        await update.message.reply_text("🟢 *Engine Started:* পেমেন্ট প্রুফ জেনারেশন চালু হয়েছে।")
     elif text == "🔴 Stop Engine":
-        if not state.is_running:
-            await update.message.reply_text("ℹ️ *System Message:* The engine is already stopped.")
-        else:
-            state.is_running = False
-            await update.message.reply_text("🔴 *Engine Stopped:* Auto production has been paused.")
-            
+        state.is_running = False
+        await update.message.reply_text("🔴 *Engine Stopped:* পেমেন্ট প্রুফ জেনারেশন বন্ধ করা হয়েছে।")
     elif text == "📊 View Live Status":
         await update.message.reply_text(get_status_text(), parse_mode="Markdown")
-        
     elif text == "🧹 Clear Old Chat":
-        status_msg = await update.message.reply_text("⏳ *Processing:* Removing the last 100 messages...")
+        status_msg = await update.message.reply_text("⏳ *Processing:* চ্যাট পরিষ্কার করা হচ্ছে...")
         current_msg_id = status_msg.message_id
         deleted_count = 0
         for i in range(1, 101):
-            target_msg_id = current_msg_id - i
             try:
-                await context.bot.delete_message(chat_id=TARGET_CHAT_ID, message_id=target_msg_id)
+                await context.bot.delete_message(chat_id=TARGET_CHAT_ID, message_id=current_msg_id - i)
                 deleted_count += 1
                 await asyncio.sleep(0.05)
             except TelegramError:
                 continue
-        await status_msg.edit_text(f"✨ *Clean Complete:* Deleted `{deleted_count}` messages successfully.")
-
-    elif text == "⏱ Preset Quick Time":
-        await update.message.reply_text(
-            "⏱ *Select a Ready Random Time Range:*",
-            reply_markup=get_time_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    elif text == "⬅️ Back to Menu":
-        await update.message.reply_text(
-            "🎛 Returning to Main Admin Menu.",
-            reply_markup=get_admin_reply_keyboard()
-        )
-
-    # ওয়ান-ক্লিক নোটিফিকেশন অন/অফ লজিক (টগল বাটন)
+        await status_msg.edit_text(f"✨ *Clean Complete:* `{deleted_count}` টি মেসেজ ডিলিট করা হয়েছে।")
+    elif text == "⏱ Change Time/Interval":
+        await update.message.reply_text("⏱ *পোস্ট করার র্যান্ডম সময় রেঞ্জ সিলেক্ট করুন:*", reply_markup=get_time_keyboard(), parse_mode="Markdown")
+    elif text == "💰 Change Amount Limit":
+        await update.message.reply_text("💰 *টাকার রেঞ্জ লিমিট সিলেক্ট করুন:*", reply_markup=get_amount_keyboard(), parse_mode="Markdown")
+    elif text == "⬅️ Back to Main Menu":
+        await update.message.reply_text("🎛 মূল মেনুতে ফিরে আসা হয়েছে।", reply_markup=get_admin_reply_keyboard())
     elif "Notification: OFF" in text:
-        state.send_silent = False # সাইলেন্ট মুড অফ অর্থাৎ নোটিফিকেশন সাউন্ড অন হবে
-        await update.message.reply_text(
-            "🔔 *Notification Enabled:* এখন থেকে চ্যানেলে মেসেজ গেলে মেম্বাররা নোটিফিকেশন সাউন্ড পাবে।",
-            reply_markup=get_admin_reply_keyboard(),
-            parse_mode="Markdown"
-        )
-        
+        state.send_silent = False
+        await update.message.reply_text("🔔 *Notification Enabled:* সাউন্ড মোড অন করা হয়েছে।", reply_markup=get_admin_reply_keyboard(), parse_mode="Markdown")
     elif "Notification: ON" in text:
-        state.send_silent = True # সাইলেন্ট মুড অন অর্থাৎ নোটিফিকেশন সাউন্ড অফ হবে
-        await update.message.reply_text(
-            "🔕 *Notification Disabled:* এখন থেকে মেসেজগুলো একদম সাইলেন্টলি চ্যানেলে পোস্ট হবে (কোনো সাউন্ড হবে না)।",
-            reply_markup=get_admin_reply_keyboard(),
-            parse_mode="Markdown"
-        )
-
-    # Preset Time Selection Buttons Logic
+        state.send_silent = True
+        await update.message.reply_text("🔕 *Notification Disabled:* সাইলেন্ট মোড অন করা হয়েছে।", reply_markup=get_admin_reply_keyboard(), parse_mode="Markdown")
+    
+    # --- Time Sub Menu Options ---
     elif text == "⏱ Random 20s - 1m":
-        state.min_interval = 20
-        state.max_interval = 60
-        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 20 seconds and 1 minute.")
+        state.min_interval, state.max_interval = 20, 60
+        await update.message.reply_text("🎯 *Adjusted:* ২০ সেকেন্ড থেকে ১ মিনিট র্যান্ডম টাইম সেট হয়েছে।")
     elif text == "⏱ Random 30s - 5m":
-        state.min_interval = 30
-        state.max_interval = 300
-        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 30 seconds and 5 minutes.")
+        state.min_interval, state.max_interval = 30, 300
+        await update.message.reply_text("🎯 *Adjusted:* ৩০ সেকেন্ড থেকে ৫ মিনিট র্যান্ডম টাইম সেট হয়েছে।")
     elif text == "⏱ Random 1m - 10m":
-        state.min_interval = 60
-        state.max_interval = 600
-        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 1 minute and 10 minutes.")
+        state.min_interval, state.max_interval = 60, 600
+        await update.message.reply_text("🎯 *Adjusted:* ১ মিনিট থেকে ১০ মিনিট র্যান্ডম টাইম সেট হয়েছে।")
     elif text == "⏱ Random 5m - 30m":
-        state.min_interval = 300
-        state.max_interval = 1800
-        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 5 minutes and 30 minutes.")
+        state.min_interval, state.max_interval = 300, 1800
+        await update.message.reply_text("🎯 *Adjusted:* ৫ মিনিট থেকে ৩০ মিনিট র্যান্ডম টাইম সেট হয়েছে।")
+    elif text == "⏱ Random 10m - 1h":
+        state.min_interval, state.max_interval = 600, 3600
+        await update.message.reply_text("🎯 *Adjusted:* ১০ মিনিট থেকে ১ ঘণ্টা র্যান্ডম টাইম সেট হয়েছে।")
+    elif text == "⏱ Random 1h - 3h":
+        state.min_interval, state.max_interval = 3600, 10800
+        await update.message.reply_text("🎯 *Adjusted:* ১ ঘণ্টা থেকে ৩ ঘণ্টা র্যান্ডম টাইম সেট হয়েছে।")
+    
+    # --- Amount Sub Menu Options ---
+    elif text == "💰 Range: 20 - 100 BDT":
+        state.min_amount, state.max_amount = 20, 100
+        await update.message.reply_text("🎯 *Adjusted:* টাকার লিমিট ২০ থেকে ১০০ BDT সেট হয়েছে।")
+    elif text == "💰 Range: 50 - 500 BDT":
+        state.min_amount, state.max_amount = 50, 500
+        await update.message.reply_text("🎯 *Adjusted:* টাকার লিমিট ৫০ থেকে ৫০০ BDT সেট হয়েছে।")
+    elif text == "💰 Range: 100 - 1000 BDT":
+        state.min_amount, state.max_amount = 100, 1000
+        await update.message.reply_text("🎯 *Adjusted:* ১০০ থেকে ১০০০ BDT সেট হয়েছে।")
+    elif text == "💰 Range: 500 - 5000 BDT":
+        state.min_amount, state.max_amount = 500, 5000
+        await update.message.reply_text("🎯 *Adjusted:* ৫০০ থেকে ৫০০০ BDT সেট হয়েছে।")
+    elif text == "💰 Range: 1000 - 10000 BDT":
+        state.min_amount, state.max_amount = 1000, 10000
+        await update.message.reply_text("🎯 *Adjusted:* ১০০০ থেকে ১০,০০০ BDT সেট হয়েছে।")
+    elif text == "💰 Range: 5000 - 25000 BDT":
+        state.min_amount, state.max_amount = 5000, 25000
+        await update.message.reply_text("🎯 *Adjusted:* ৫০০০ থেকে ২৫,০০০ BDT সেট হয়েছে।")
 
 async def post_init(application: Application) -> None:
     asyncio.create_task(proof_delivery_worker(application))
-    logger.info("Background tasks attached via post_init hook.")
+    asyncio.create_task(daily_summary_worker(application))
+    logger.info("Pipelines launched.")
 
 def main():
     if not BOT_TOKEN:
-        logger.error("CRITICAL: BOT_TOKEN missing.")
         return
-
     server_thread = threading.Thread(target=run_health_server, daemon=True)
     server_thread.start()
 
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-
-    # Commands
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("admin", start_cmd)) 
-    application.add_handler(CommandHandler("range", range_cmd))
-    application.add_handler(CommandHandler("timerange", timerange_cmd))
-    
-    # Text Message Handler for Keyboard Buttons
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_button_text_handler))
-
-    logger.info("Starting polling loop...")
+    
     application.run_polling()
 
 if __name__ == "__main__":
