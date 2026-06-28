@@ -101,6 +101,7 @@ def generate_proof_message():
     
     method_bn = "বিকাশ" if method == "bKash" else "নগদ"
     
+    # ১০-১৫ টা সাকসেসের পর ১টা রিয়ালিস্টিক ফেইল্ড মেসেজ সিমুলেশন
     if state.success_counter >= state.next_failure_target:
         state.success_counter = 0
         state.next_failure_target = random.randint(10, 15)
@@ -158,7 +159,7 @@ async def proof_delivery_worker(application: Application):
         except Exception:
             await asyncio.sleep(5)
 
-# Daily Summary Worker
+# Daily Summary Worker (রাত ৮টায় বাংলাদেশ সময়)
 async def daily_summary_worker(application: Application):
     tz = ZoneInfo("Asia/Dhaka")
     while True:
