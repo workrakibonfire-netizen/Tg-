@@ -44,9 +44,11 @@ PORT = int(os.getenv("PORT", "10000"))
 class AppState:
     def __init__(self):
         self.is_running = True
-        self.interval = 30  
         self.min_amount = 20  
         self.max_amount = 500  
+        self.min_interval = 20   
+        self.max_interval = 300  
+        self.send_silent = True  # True হলে সাইলেন্ট (নোটিফিকেশন যাবে না), False হলে সাউন্ড যাবে
 
 state = AppState()
 
@@ -95,26 +97,32 @@ def generate_random_payment():
     
     return message
 
-# Background Task for Automatic Proof Delivery
+# Background Task for Automatic Proof Delivery with Random Interval
 async def proof_delivery_worker(application: Application):
     logger.info("Auto payment proof worker task started.")
     while True:
         try:
+            current_sleep_time = random.randint(state.min_interval, state.max_interval)
+            logger.info(f"Next proof will be sent after a random interval of {current_sleep_time} seconds.")
+            
+            await asyncio.sleep(current_sleep_time)
+            
             if state.is_running:
                 proof_text = generate_random_payment()
                 try:
+                    # state.send_silent এর উপর ভিত্তি করে নোটিফিকেশন অন/অফ হবে
                     await application.bot.send_message(
                         chat_id=TARGET_CHAT_ID,
                         text=proof_text,
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
+                        disable_notification=state.send_silent 
                     )
-                    logger.info(f"Payment proof successfully dispatched to chat ID: {TARGET_CHAT_ID}")
+                    logger.info(f"Payment proof dispatched. Silent Mode: {state.send_silent}")
                 except TelegramError as te:
                     logger.error(f"Telegram API Error during dispatch: {te}")
                 except Exception as e:
                     logger.error(f"Unexpected transmission error: {e}")
             
-            await asyncio.sleep(state.interval)
         except asyncio.CancelledError:
             logger.info("Auto payment proof worker task received cancel signal.")
             break
@@ -126,11 +134,15 @@ async def proof_delivery_worker(application: Application):
 def is_admin(update: Update) -> bool:
     return update.effective_user is not None and update.effective_user.id == SUPER_ADMIN_ID
 
-# Main Admin Keyboard
+# Main Admin Keyboard (ডায়নামিক বাটন সহ)
 def get_admin_reply_keyboard():
+    # নোটিফিকেশন স্ট্যাটাস অনুযায়ী বাটনের টেক্সট সেট হবে
+    notif_button_text = "🔕 Notification: OFF (Silent)" if state.send_silent else "🔔 Notification: ON (Sound)"
+    
     keyboard = [
         [KeyboardButton("🟢 Start Engine"), KeyboardButton("🔴 Stop Engine")],
-        [KeyboardButton("⏱ Change Time/Interval"), KeyboardButton("📊 View Live Status")],
+        [KeyboardButton(notif_button_text)],
+        [KeyboardButton("⏱ Preset Quick Time"), KeyboardButton("📊 View Live Status")],
         [KeyboardButton("🧹 Clear Old Chat")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
@@ -138,34 +150,34 @@ def get_admin_reply_keyboard():
 # Time Selection Sub-Keyboard
 def get_time_keyboard():
     keyboard = [
-        [KeyboardButton("⏱ 30 Seconds"), KeyboardButton("⏱ 1 Minute")],
-        [KeyboardButton("⏱ 5 Minutes"), KeyboardButton("⏱ 10 Minutes")],
-        [KeyboardButton("⏱ 1 Hour"), KeyboardButton("⏱ 2 Hours")],
+        [KeyboardButton("⏱ Random 20s - 1m"), KeyboardButton("⏱ Random 30s - 5m")],
+        [KeyboardButton("⏱ Random 1m - 10m"), KeyboardButton("⏱ Random 5m - 30m")],
         [KeyboardButton("⬅️ Back to Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, selective=True)
 
+# Seconds to Format Conversion Helper
+def format_seconds(seconds):
+    if seconds < 60:
+        return f"{seconds} seconds"
+    return f"{seconds // 60} minute(s)"
+
 def get_status_text():
     run_status = "✨ Running / Active" if state.is_running else "💤 Stopped / Paused"
+    notif_status = "🔕 OFF (Silent Mode)" if state.send_silent else "🔔 ON (Sound Notification)"
     
-    # Format interval text nicely for the user
-    if state.interval < 60:
-        time_display = f"{state.interval} seconds"
-    elif state.interval < 3600:
-        time_display = f"{state.interval // 60} minute(s)"
-    else:
-        time_display = f"{state.interval // 3600} hour(s)"
-
     return (
         f"👑 *⚡ ADMIN CONTROL CENTER ⚡*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🤖 *Bot Current Status:* {run_status}\n"
-        f"⏱ *Sending Interval:* `{time_display}`\n"
+        f"📢 *User Notification:* `{notif_status}`\n"
+        f"🎲 *Random Time Range:* `{format_seconds(state.min_interval)}` to `{format_seconds(state.max_interval)}`\n"
         f"💵 *Amount Matrix Range:* `{state.min_amount} - {state.max_amount} BDT`\n"
-        f"📢 *Destination Channel/Group:* `{TARGET_CHAT_ID}`\n\n"
+        f"📢 *Destination Chat ID:* `{TARGET_CHAT_ID}`\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Quick Tip:* To set custom amount matrix range, use:\n"
-        f"▫️ `/range 50 200` (To change BDT limits)"
+        f"💡 *Quick Settings via Text Commands:*\n"
+        f"▫️ `/timerange 20 300` (Set Custom Time Range in Seconds)\n"
+        f"▫️ `/range 50 200` (Set Custom BDT limits)"
     )
 
 # Command Handlers
@@ -176,7 +188,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(
         "👋 *Welcome Back, Admin!*\n\n"
-        "🎛 Your control panel has been loaded below. Use buttons to manage settings.",
+        "🎛 Your control panel has been loaded below. Use buttons or text commands to manage settings.",
         reply_markup=get_admin_reply_keyboard(),
         parse_mode="Markdown"
     )
@@ -198,6 +210,23 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ *Error:* Please enter valid whole numbers.")
 
+async def timerange_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ *Usage Example (in seconds):* `/timerange 20 300` (For 20s to 5m)", parse_mode="Markdown")
+        return
+    try:
+        min_t = int(context.args[0])
+        max_t = int(context.args[1])
+        if min_t <= 0 or max_t <= 0 or min_t > max_t:
+            raise ValueError()
+        state.min_interval = min_t
+        state.max_interval = max_t
+        await update.message.reply_text(f"🎯 *Success:* Random post time range set to *{format_seconds(min_t)} - {format_seconds(max_t)}*.", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("❌ *Error:* Please enter valid numbers in seconds.")
+
 # Handler for Admin Panel Buttons text input
 async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -210,7 +239,7 @@ async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("ℹ️ *System Message:* The engine is already active.")
         else:
             state.is_running = True
-            await update.message.reply_text("🟢 *Engine Started:* Auto payment proof generation is live.")
+            await update.message.reply_text("🟢 *Engine Started:* Auto random payment proof generation is live.")
             
     elif text == "🔴 Stop Engine":
         if not state.is_running:
@@ -236,9 +265,9 @@ async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAUL
                 continue
         await status_msg.edit_text(f"✨ *Clean Complete:* Deleted `{deleted_count}` messages successfully.")
 
-    elif text == "⏱ Change Time/Interval":
+    elif text == "⏱ Preset Quick Time":
         await update.message.reply_text(
-            "⏱ *Select Proof Post Interval Time:*",
+            "⏱ *Select a Ready Random Time Range:*",
             reply_markup=get_time_keyboard(),
             parse_mode="Markdown"
         )
@@ -249,25 +278,40 @@ async def admin_button_text_handler(update: Update, context: ContextTypes.DEFAUL
             reply_markup=get_admin_reply_keyboard()
         )
 
-    # Time Selection Logic
-    elif text == "⏱ 30 Seconds":
-        state.interval = 30
-        await update.message.reply_text("🎯 *Interval Set:* 30 Seconds. Message will post every 30s.")
-    elif text == "⏱ 1 Minute":
-        state.interval = 60
-        await update.message.reply_text("🎯 *Interval Set:* 1 Minute. Message will post every 60s.")
-    elif text == "⏱ 5 Minutes":
-        state.interval = 300
-        await update.message.reply_text("🎯 *Interval Set:* 5 Minutes.")
-    elif text == "⏱ 10 Minutes":
-        state.interval = 600
-        await update.message.reply_text("🎯 *Interval Set:* 10 Minutes.")
-    elif text == "⏱ 1 Hour":
-        state.interval = 3600
-        await update.message.reply_text("🎯 *Interval Set:* 1 Hour.")
-    elif text == "⏱ 2 Hours":
-        state.interval = 7200
-        await update.message.reply_text("🎯 *Interval Set:* 2 Hours.")
+    # ওয়ান-ক্লিক নোটিফিকেশন অন/অফ লজিক (টগল বাটন)
+    elif "Notification: OFF" in text:
+        state.send_silent = False # সাইলেন্ট মুড অফ অর্থাৎ নোটিফিকেশন সাউন্ড অন হবে
+        await update.message.reply_text(
+            "🔔 *Notification Enabled:* এখন থেকে চ্যানেলে মেসেজ গেলে মেম্বাররা নোটিফিকেশন সাউন্ড পাবে।",
+            reply_markup=get_admin_reply_keyboard(),
+            parse_mode="Markdown"
+        )
+        
+    elif "Notification: ON" in text:
+        state.send_silent = True # সাইলেন্ট মুড অন অর্থাৎ নোটিফিকেশন সাউন্ড অফ হবে
+        await update.message.reply_text(
+            "🔕 *Notification Disabled:* এখন থেকে মেসেজগুলো একদম সাইলেন্টলি চ্যানেলে পোস্ট হবে (কোনো সাউন্ড হবে না)।",
+            reply_markup=get_admin_reply_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    # Preset Time Selection Buttons Logic
+    elif text == "⏱ Random 20s - 1m":
+        state.min_interval = 20
+        state.max_interval = 60
+        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 20 seconds and 1 minute.")
+    elif text == "⏱ Random 30s - 5m":
+        state.min_interval = 30
+        state.max_interval = 300
+        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 30 seconds and 5 minutes.")
+    elif text == "⏱ Random 1m - 10m":
+        state.min_interval = 60
+        state.max_interval = 600
+        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 1 minute and 10 minutes.")
+    elif text == "⏱ Random 5m - 30m":
+        state.min_interval = 300
+        state.max_interval = 1800
+        await update.message.reply_text("🎯 *Time Range Adjusted:* Randomly between 5 minutes and 30 minutes.")
 
 async def post_init(application: Application) -> None:
     asyncio.create_task(proof_delivery_worker(application))
@@ -287,6 +331,7 @@ def main():
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("admin", start_cmd)) 
     application.add_handler(CommandHandler("range", range_cmd))
+    application.add_handler(CommandHandler("timerange", timerange_cmd))
     
     # Text Message Handler for Keyboard Buttons
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_button_text_handler))
